@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "tied"
+version = "0.0.1"
+description = "TIED - Text to Image Encoder-Decoder"
+authors = ["knowledgator.com"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.9,<4.0"
+torch = "^2.0.0"
+transformers = ">=4.37.2,<=4.48.2"
+diffusers = "0.34.0"
+scikit-learn = "^1.0.0" 
+numpy = "^1.26.4"
+torchvision = "0.22.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
