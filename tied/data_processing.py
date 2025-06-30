@@ -49,9 +49,9 @@ class TIEDDataset(Dataset):
             max_length=self.max_length,
             return_tensors="pt"
         )
-
-        return {
+        result = {
             "input_ids": encoded["input_ids"].squeeze(0),
             "attention_mask": encoded["attention_mask"].squeeze(0),
-            "pixel_values": pixel_values
+            "pixel_values": pixel_values.unsqueeze(0)
         }
+        return result

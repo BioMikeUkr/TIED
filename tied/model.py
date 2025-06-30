@@ -12,7 +12,7 @@ from safetensors.torch import save_file, load_file
 from huggingface_hub import create_repo, upload_folder, hf_hub_download
 
 from .config import TIEDModelConfig
-from .layers import Encoder2DecoderProjector, Decoder2ChanelsProjector, Latent2DecoderProjector
+from .layers import Encoder2DecoderProjector, Decoder2ChanelsProjector, Chanels2DecoderProjector
 from .pooling import POOLING2OBJECT
 
 @dataclass
@@ -46,11 +46,10 @@ class TIEDModel(PreTrainedModel):
 
         self.encoder2decoder_projector = Encoder2DecoderProjector(config)
         self.decoder2chanels_projector = Decoder2ChanelsProjector(config)
-        self.latent2decoder_projector = Latent2DecoderProjector(config)
+        self.chanels2decoder_projector = Chanels2DecoderProjector(config)
 
-        self.pooler  = POOLING2OBJECT[config.text_prompt_pooling_type]
+        self.pooler  = POOLING2OBJECT[config.text_prompt_pooling_type]()
 
-        self.device = torch.device(device)
 
     def save_pretrained(self, save_directory, **kwargs):
         os.makedirs(save_directory, exist_ok=True)
@@ -120,9 +119,6 @@ class TIEDModel(PreTrainedModel):
             repo_type="model"
         )
 
-    def _get_latents(self, input_images=None):
-        return self.vae.encode(input_images).latent_dist.sample().view(-1, 1024)
-
     def get_diffused_latents(self, input_images: torch.Tensor) -> torch.Tensor:
         steps = self.config.z_step
 
@@ -131,7 +127,7 @@ class TIEDModel(PreTrainedModel):
 
         with torch.no_grad():
             latents = self.vae.encode(input_images).latent_dist.sample()
-
+        
         betas = torch.linspace(1e-4, 0.3, steps, device=latents.device, dtype=latents.dtype)
         alphas = 1.0 - betas
         alpha_bars = torch.cumprod(alphas, dim=0)
@@ -170,7 +166,7 @@ class TIEDModel(PreTrainedModel):
             raise ValueError("Either input_images or input_latents must be provided")
 
         # Project latents to decoder space
-        projected_latents = self.decoder2chanels_projector(latents)
+        projected_latents = self.chanels2decoder_projector(latents)
 
         zero_embeds = torch.zeros(
             (projected_latents.shape[0], self.config.z_step, self.config.decoder_config.hidden_size),
@@ -185,11 +181,12 @@ class TIEDModel(PreTrainedModel):
 
         zero_embeds[:, 0, :] = prompts
         zero_embeds[:, 1:, :] = projected_latents[:, -1:, :]
+        
 
         return {
             "inputs_embeds": zero_embeds,
             "attention_mask": zero_attention_mask,
-            "latent_labels": projected_latents
+            "latent_labels": latents
         }
     
 
@@ -206,7 +203,7 @@ class TIEDModel(PreTrainedModel):
         )
 
         # Project to latent space
-        latent_features = self.latent2decoder_projector(decoder_outputs.last_hidden_state)
+        latent_features = self.decoder2chanels_projector(decoder_outputs.hidden_states[-1])
 
         return latent_features
 
@@ -218,19 +215,17 @@ class TIEDModel(PreTrainedModel):
         loss = torch.nn.functional.mse_loss(x, y, reduction=self.config.reduction)
         return loss
     
-    def forward(self, input_ids=None, attention_mask=None, input_images=None, decoder_inputs=None, **kwargs):
+    def forward(self, input_ids=None, attention_mask=None, input_images=None, **kwargs):
         if input_ids is None:
             raise ValueError("input_ids must be provided")
-        
-
-        if input_images is not None:
-            prompts = self.get_prompt_embeddings(input_ids, attention_mask)
-            decoder_inputs = self.construct_decoder_inputs(prompts, input_images)
+        prompts = self.get_prompt_embeddings(input_ids, attention_mask)
+        decoder_inputs = self.construct_decoder_inputs(prompts, input_images)
 
         decoded_latents = self.decode_prompts(
             inputs_embeds=decoder_inputs["inputs_embeds"],
             attention_mask=decoder_inputs["attention_mask"]
         )
+
         loss = None
         if input_images is not None:
             loss = self.get_loss(decoder_inputs["latent_labels"], decoded_latents)
@@ -258,9 +253,9 @@ class TIEDModel(PreTrainedModel):
                 return_dict=True,
                 output_hidden_states=True
             )
-            decoded_latent = self.decoder2chanels_projector(decoder_outputs.last_hidden_state[:, -1, :])
+            decoded_latent = self.decoder2chanels_projector(decoder_outputs.hidden_states[:, -1, :])
 
-            next_input_embed = self.latent2decoder_projector(decoded_latent)
+            next_input_embed = self.chanels2decoder_projector(decoded_latent)
 
             inputs_embeds = torch.cat([inputs_embeds, next_input_embed], dim=1)
             attention_mask = torch.cat([attention_mask, torch.ones((batch_size, 1), device=attention_mask.device)], dim=1)
@@ -273,7 +268,7 @@ class TIEDModel(PreTrainedModel):
             return_dict=True,
             output_hidden_states=True
         )
-        decoded_latent = self.decoder2chanels_projector(decoder_outputs.last_hidden_state[:, -1, :])
+        decoded_latent = self.decoder2chanels_projector(decoder_outputs.hidden_states[:, -1, :])
         decoded_latents.append(decoded_latent)
         decoded_latents = torch.stack(decoded_latents, dim=1)
 

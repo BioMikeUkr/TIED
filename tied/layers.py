@@ -26,25 +26,27 @@ class Decoder2LatentProjector(nn.Module):
         super().__init__()
 
         num_down_blocks = len(config.vae_config["down_block_types"])
-
-        out_size = (config.image_size // (2 ** num_down_blocks)) ** 2
+        out_spatial = config.image_size // (2 * num_down_blocks)
+        out_size = out_spatial * out_spatial  # 16 * 16 = 256
 
         self.linear_1 = nn.Linear(config.decoder_config.hidden_size, config.hidden_size)
         self.act = ACT2FN[config.projector_hidden_act]
         self.linear_2 = nn.Linear(config.hidden_size, out_size)
 
-    def forward(self, features):
+    def forward(self, features):  # [B, T, hidden]
         x = self.linear_1(features)
         x = self.act(x)
-        return self.linear_2(x)
+        return self.linear_2(x)  # [B, T, out_size]
+
     
-class Latent2DecoderProjector(nn.Module):
+class Chanels2DecoderProjector(nn.Module):
     def __init__(self, config: TIEDModelConfig):
         super().__init__()
 
         num_down_blocks = len(config.vae_config["down_block_types"])
 
-        in_size = (config.image_size // (2 ** num_down_blocks)) ** 2
+        latent_channels = config.vae_config.get("latent_channels", 4)
+        in_size = (config.image_size // (2 * num_down_blocks)) ** 2 * latent_channels
         self.out_size = config.decoder_config.hidden_size
 
         self.linear_1 = nn.Linear(in_size, config.hidden_size)
@@ -52,21 +54,26 @@ class Latent2DecoderProjector(nn.Module):
         self.linear_2 = nn.Linear(config.hidden_size, config.decoder_config.hidden_size)
 
     def forward(self, features):
-        x = features.view(-1, self.out_size)
+        B, Z, C, H, W = features.shape
+        x = features.view(B, Z, C * H * W)  # [B, Z, in_size]
         x = self.linear_1(x)
         x = self.act(x)
-        return self.linear_2(x)
+        return self.linear_2(x)  # [B, Z, hidden]
+
     
 class Decoder2ChanelsProjector(nn.Module):
     def __init__(self, config: TIEDModelConfig):
         super().__init__()
-
-        latent_channels = config.vae_config["latent_channels"]
+        self.latent_channels = config.vae_config["latent_channels"]
+        self.spatial_size = config.image_size // (2 * len(config.vae_config["down_block_types"]))
 
         self.projector = nn.ModuleList([
-            Decoder2LatentProjector(config) for _ in range(latent_channels)
+            Decoder2LatentProjector(config) for _ in range(self.latent_channels)
         ])
 
-    def forward(self, features):
-        latents = [p(features) for p in self.projector]
-        return torch.stack(latents, dim=1)
+    def forward(self, features):  # [B, T, hidden]
+        latents = [p(features) for p in self.projector]  # each: [B, T, H*W]
+        latents = torch.stack(latents, dim=2)  # [B, C, T, H*W]
+        latents = latents.view(latents.size(0), latents.size(1), latents.size(2), self.spatial_size, self.spatial_size)        
+        return latents
+
