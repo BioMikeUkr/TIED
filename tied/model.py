@@ -268,7 +268,7 @@ class TIEDModel(PreTrainedModel):
             return_dict=True,
             output_hidden_states=True
         )
-        decoded_latent = self.decoder2chanels_projector(decoder_outputs.hidden_states[:, -1, :])
+        decoded_latent = self.decoder2chanels_projector(final_decoder_outputs.hidden_states[:, -1, :])
         decoded_latents.append(decoded_latent)
         decoded_latents = torch.stack(decoded_latents, dim=1)
 
