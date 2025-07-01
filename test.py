@@ -1,6 +1,7 @@
 from tied import TIEDModel, TIEDModelConfig
 from transformers import AutoConfig, LlamaConfig
 from diffusers import AutoencoderKL
+from transformers import AutoTokenizer
 
 # vae = AutoencoderKL.from_pretrained("stabilityai/sdxl-vae")
 
@@ -26,6 +27,9 @@ from diffusers import AutoencoderKL
 model = TIEDModel.from_pretrained("models/final_model")
 # model = TIEDModel(config)
 # model.save_pretrained("my_model_dir")
-model.push_to_hub("BioMike/TIDE-deberta-v3-small-sdxl-vae", token="")
+token = ""
+tokenizer = AutoTokenizer.from_pretrained("models/final_model")
+tokenizer.push_to_hub("BioMike/TIDE-deberta-v3-small-sdxl-vae", token=token)
+model.push_to_hub("BioMike/TIDE-deberta-v3-small-sdxl-vae", token=token)
 
 model = TIEDModel.from_pretrained("BioMike/TIDE-deberta-v3-small-sdxl-vae")

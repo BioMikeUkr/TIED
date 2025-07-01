@@ -125,8 +125,7 @@ class TIEDModel(PreTrainedModel):
         if input_images.dim() != 4:
             raise ValueError("Expected input_images of shape (B, 3, H, W)")
 
-        with torch.no_grad():
-            latents = self.vae.encode(input_images).latent_dist.sample()
+        latents = self.vae.encode(input_images).latent_dist.sample()
         
         betas = torch.linspace(1e-4, 0.3, steps, device=latents.device, dtype=latents.dtype)
         alphas = 1.0 - betas
@@ -140,7 +139,7 @@ class TIEDModel(PreTrainedModel):
             noised_latent = torch.sqrt(alpha_bar) * latents + torch.sqrt(1 - alpha_bar) * noise
             all_noised_latents.append(noised_latent)
 
-        return torch.stack(all_noised_latents, dim=1)
+        return torch.stack(all_noised_latents[::-1], dim=1)
     
     def get_prompt_embeddings(self, input_ids, attention_mask=None):
         if input_ids is None:

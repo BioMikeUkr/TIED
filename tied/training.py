@@ -31,9 +31,17 @@ class TIEDTrainer(Trainer):
         *args,
         **kwargs
     ):
-        model.train()
-        loss = self.compute_loss(model, inputs)
-        return loss
+        try:
+            model.train()
+            loss = self.compute_loss(model, inputs)
+            self.accelerator.backward(loss, **kwargs)
+            return loss.detach()
+        except Exception as e:
+            print(f"Skipping iteration due to error: {e}")
+            model.zero_grad(set_to_none=True)
+            torch.cuda.empty_cache()
+            return torch.tensor(0.0, requires_grad=True).to(model.device)
+            
 
     def _save_checkpoint(self, model, step=None):
         checkpoint_dir = f"checkpoint-{step}" if step else "final_model"
