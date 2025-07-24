@@ -56,6 +56,11 @@ def main(args):
     else:
         model = TIEDModel(config).to(device)
 
+    if args.n_pooling_tokens is not None:
+            new_words = ["<<VISUAL_TOKEN>>"]
+            tokenizer.add_tokens(new_words, special_tokens=True)
+            model.resize_token_embeddings(len(tokenizer))
+
     # Load dataset
     try:
         dataset = json.load(open(args.train_data, 'r'))
@@ -77,6 +82,7 @@ def main(args):
         image_transform=image_transform,
         tokenizer=tokenizer,
         max_length=args.max_length,
+        randomize_prompts=args.randomize_prompts,
     )
     # Create DataLoader
     training_args = TrainingArguments(
@@ -106,22 +112,24 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, help="Name of the model to train", default=None)
+    parser.add_argument("--text_encoder_model", type=str, default="microsoft/deberta-v3-small", help="Pretrained text encoder model")
     parser.add_argument("--train_data", type=str, help="Path to training data file", default= "wikiart_dataset.json")
     parser.add_argument("--save_path", type=str, help="Directory to save the model", default="models")
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
+    parser.add_argument("--n_pooling_tokens", type=int, default=3, help="Number of pooling tokens")
+    parser.add_argument("--randomize_prompts", type=bool, default=True, help="Randomize prompts during training")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--num_epochs", type=int, default=100, help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate for the optimizer")
-    parser.add_argument("--max_length", type=int, default=64, help="Maximum length of text sequences")
-    parser.add_argument("--image_size", type=int, default=64, help="Size of input images")
-    parser.add_argument("--text_encoder_model", type=str, default="answerdotai/ModernBERT-large", help="Pretrained text encoder model")
+    parser.add_argument("--max_length", type=int, default=128, help="Maximum length of text sequences")
+    parser.add_argument("--image_size", type=int, default=256, help="Size of input images")
     parser.add_argument("--vae_model", type=str, default="stabilityai/sdxl-vae", help="Pretrained VAE model")
-    parser.add_argument("--hidden_size", type=int, default=1024, help="Hidden size for the decoder")
-    parser.add_argument("--text_prompt_pooling_type", type=str, default="first", help="Pooling type for text prompts")
+    parser.add_argument("--hidden_size", type=int, default=4096, help="Hidden size for the decoder")
+    parser.add_argument("--text_prompt_pooling_type", type=str, default="n_token", help="Pooling type for text prompts")
     parser.add_argument("--projector_hidden_act", type=str, default="gelu", help="Activation function for projectors")
     parser.add_argument("--reduction", type=str, default="mean", help="Reduction method for loss calculation")
-    parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for DataLoader")
+    parser.add_argument("--num_workers", type=int, default=16, help="Number of workers for DataLoader")
     parser.add_argument("--fp16", type=bool, default=False, help="Use mixed precision training if available")
-    parser.add_argument("--logging_steps", type=int, default=10, help="Number of steps between logging")
+    parser.add_argument("--logging_steps", type=int, default=50, help="Number of steps between logging")
     parser.add_argument("--save_steps", type=int, default=500, help="Number of steps between saving checkpoints")
     parser.add_argument("--eval_steps", type=int, default=10000000, help="Number of steps between evaluations")
     parser.add_argument("--save_total_limit", type=int, default=2, help="Maximum number of checkpoints to keep")

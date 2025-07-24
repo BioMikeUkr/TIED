@@ -1,6 +1,10 @@
 import os
 import tempfile
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributions import Normal, kl_divergence
+
 from typing import Optional, Union
 from dataclasses import dataclass
 from transformers import (
@@ -12,12 +16,12 @@ from safetensors.torch import save_file, load_file
 from huggingface_hub import create_repo, upload_folder, hf_hub_download
 
 from .config import TIEDModelConfig
-from .layers import Encoder2DecoderProjector, Decoder2ChanelsProjector, Chanels2DecoderProjector, SelfAttentionBlock, Encoder2ChanelsProjector
+from .layers import Encoder2ChanelsProjector, FeaturesProjector
 from .pooling import POOLING2OBJECT
 
 @dataclass
 class TIEDModelOutput(BaseModelOutput):
-   decoded_latents: torch.Tensor = None
+   encoded_latents: torch.Tensor = None
    loss: Optional[torch.Tensor] = None
 
 
@@ -43,10 +47,14 @@ class TIEDModel(PreTrainedModel):
         self.vocab_size = config.vocab_size
         self.text_prompt_pooling_type = config.text_prompt_pooling_type
         self.projector_hidden_act = ACT2FN[config.projector_hidden_act]
-
+        self.visual_tokens_projector = FeaturesProjector(
+            config, in_dim=config.text_encoder_config.hidden_size * (1 + config.n_pooling_tokens),
+            out_dim=config.text_encoder_config.hidden_size * (1 + config.n_pooling_tokens),
+            hidden_dim=config.hidden_size
+        )
         self.encoder2chanels_projector = Encoder2ChanelsProjector(config)
 
-        self.pooler  = POOLING2OBJECT[config.text_prompt_pooling_type]()
+        self.pooler  = POOLING2OBJECT[config.text_prompt_pooling_type](config.n_pooling_tokens)
 
         self.dropout = torch.nn.Dropout(0.2)
 
@@ -113,14 +121,15 @@ class TIEDModel(PreTrainedModel):
             token=token,
             repo_type="model"
         )
+    def resize_token_embeddings(self, new_num_tokens: Optional[int] = None, pad_to_multiple_of=None) -> nn.Embedding:
+        model_embeds = self.text_encoder.resize_token_embeddings(new_num_tokens, pad_to_multiple_of)
 
+        self.config.text_encoder_config.vocab_size = model_embeds.num_embeddings
+        return model_embeds
+    
     def get_loss(self, x, y):
-        if x is None or y is None:
-            raise ValueError("Both x and y must be provided for loss calculation")
-        
-        loss = torch.nn.functional.mse_loss(x, y, reduction=self.config.reduction)
-
-        return loss
+        mse = F.mse_loss(x, y, reduction=self.config.reduction)
+        return mse
 
     def get_diffused_latents(self, input_images: torch.Tensor) -> torch.Tensor:
         if input_images.dim() != 4:
@@ -139,7 +148,11 @@ class TIEDModel(PreTrainedModel):
         text_features = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
 
         # Pool text features
-        pooled_features = self.dropout(self.pooler(text_features))
+        pooled_features = self.pooler(text_features)
+        pooled_features = pooled_features.view(pooled_features.size(0), -1)
+
+        pooled_features = self.visual_tokens_projector(pooled_features)  # [B, T, hidden]
+        pooled_features = self.dropout(pooled_features)
 
         encoded_latents = self.encoder2chanels_projector(pooled_features)
 
@@ -148,7 +161,7 @@ class TIEDModel(PreTrainedModel):
             true_latents = self.get_diffused_latents(input_images)
             loss = self.get_loss(encoded_latents, true_latents)
         return TIEDModelOutput(
-            decoded_latents=encoded_latents,
+            encoded_latents=encoded_latents,
             loss=loss
         )
 

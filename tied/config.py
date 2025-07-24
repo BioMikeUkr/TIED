@@ -13,7 +13,7 @@ class TIEDModelConfig(PretrainedConfig):
         vae_config=None,
         image_size=256,
         hidden_size=1024,
-        vocab_size=1,
+        n_pooling_tokens=1,
         text_prompt_pooling_type="first",
         projector_hidden_act="gelu",
         reduction = "mean",
@@ -28,13 +28,13 @@ class TIEDModelConfig(PretrainedConfig):
             raise ValueError("text_encoder_config must be dict or PretrainedConfig")
 
         self.reduction = reduction
+        self.n_pooling_tokens = n_pooling_tokens
         self.image_size = image_size
         self.hidden_size = hidden_size
         self.text_encoder_config = text_encoder_config
         self.text_encoder_model = text_encoder_model
         self.vae_model = vae_model
         self.vae_config = vae_config
-        self.vocab_size = vocab_size
         self.text_prompt_pooling_type = text_prompt_pooling_type
         self.projector_hidden_act = projector_hidden_act
 
