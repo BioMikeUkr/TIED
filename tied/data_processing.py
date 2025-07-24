@@ -2,6 +2,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 from transformers import PreTrainedTokenizer
 import requests
+import random
 from io import BytesIO
 import os
 
@@ -38,12 +39,43 @@ class TIEDDataset(Dataset):
         return image
 
     def __getitem__(self, idx):
+
         entry = self.data[idx]
+        prompt = entry["prompt"]
+        actions = ["none", "upper", "lower"]
+        modifications = ["none", "add_space", "add_tab", "add_newline"]
+        cuts = ["none", "cut_05", "cut_025", "random_cut"]
+        cut = random.choice(cuts)
+        action = random.choice(actions)
+        modification = random.choice(modifications)
+        if action == "none":
+            prompt = prompt
+        elif action == "upper":
+            prompt = prompt.upper()
+        elif action == "lower":
+            prompt = prompt.lower()
+        if modification == "none":
+            prompt = prompt
+        elif modification == "add_space":
+            prompt = " " + prompt + " "
+        elif modification == "add_tab":
+            prompt = "\t" + prompt + "\t"
+        elif modification == "add_newline":
+            prompt = "\n" + prompt + "\n"
+        if cut == "cut_05":
+            prompt = prompt[:len(prompt) // 2]
+        elif cut == "cut_025":
+            prompt = prompt[:len(prompt) // 4]
+        elif cut == "random_cut":
+            cut_length = random.randint(1, len(prompt))
+            start_index = random.randint(0, len(prompt) - cut_length)
+            prompt = prompt[:start_index] + prompt[start_index + cut_length:]
+        
         image = self._load_image(entry["image"])
         pixel_values = self.image_transform(image)
 
         encoded = self.tokenizer(
-            entry["prompt"],
+            prompt,
             padding="max_length",
             truncation=True,
             max_length=self.max_length,

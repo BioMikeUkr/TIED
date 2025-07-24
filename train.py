@@ -32,18 +32,6 @@ def main(args):
     # Load VAE model
     vae = AutoencoderKL.from_pretrained(args.vae_model)
 
-    # Define decoder configuration
-    decoder_config = LlamaConfig(
-        vocab_size=1,
-        hidden_size=args.decoder_hidden_size,
-        num_hidden_layers=args.decoder_num_hidden_layers,
-        num_attention_heads=args.decoder_num_attention_heads,
-        intermediate_size=args.decoder_intermediate_size,
-        max_position_embeddings=args.decoder_max_position_embeddings,
-        rope_theta=args.decoder_rope_theta
-    )
-
-    # Load text encoder configuration
     text_encoder_config = AutoConfig.from_pretrained(args.text_encoder_model).to_dict()
 
     tokenizer = AutoTokenizer.from_pretrained(args.text_encoder_model)
@@ -51,20 +39,22 @@ def main(args):
     config = TIEDModelConfig(
         text_encoder_model=args.text_encoder_model,
         text_encoder_config=text_encoder_config,
-        decoder_config=decoder_config.to_dict(),
         vae_model=args.vae_model,
         vae_config=vae.config,
         vocab_size=1,
         image_size=args.image_size,
         hidden_size=args.hidden_size,
-        z_step=args.z_step,
         text_prompt_pooling_type=args.text_prompt_pooling_type,
         projector_hidden_act=args.projector_hidden_act,
         reduction=args.reduction,
     )
 
     # Initialize the TIED model
-    model = TIEDModel(config).to(device)
+    if args.model_name:
+        model = TIEDModel.from_pretrained(args.model_name, reduction=args.reduction).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name, add_prefix_space=True)
+    else:
+        model = TIEDModel(config).to(device)
 
     # Load dataset
     try:
@@ -75,7 +65,6 @@ def main(args):
 
     random.seed(42)
     random.shuffle(dataset)
-
     # Define image transformations
     image_transform = transforms.Compose([
         transforms.Resize((args.image_size, args.image_size)),
@@ -98,7 +87,6 @@ def main(args):
         learning_rate=args.learning_rate,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
-        evaluation_strategy="no",  #  "steps"/"epoch"
         save_total_limit=args.save_total_limit,
         fp16=args.fp16,
         lr_scheduler_type="cosine"
@@ -114,33 +102,28 @@ def main(args):
 
     # Start training
     trainer.train()
+# checkpoint-267600
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train_data", type=str, help="Path to training data file", default= "/content/wikiart_dataset.json")
+    parser.add_argument("--model_name", type=str, help="Name of the model to train", default=None)
+    parser.add_argument("--train_data", type=str, help="Path to training data file", default= "wikiart_dataset.json")
     parser.add_argument("--save_path", type=str, help="Directory to save the model", default="models")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
-    parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate for the optimizer")
-    parser.add_argument("--max_length", type=int, default=128, help="Maximum length of text sequences")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
+    parser.add_argument("--num_epochs", type=int, default=100, help="Number of training epochs")
+    parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate for the optimizer")
+    parser.add_argument("--max_length", type=int, default=64, help="Maximum length of text sequences")
     parser.add_argument("--image_size", type=int, default=64, help="Size of input images")
-    parser.add_argument("--text_encoder_model", type=str, default="microsoft/deberta-v3-base", help="Pretrained text encoder model")
+    parser.add_argument("--text_encoder_model", type=str, default="answerdotai/ModernBERT-large", help="Pretrained text encoder model")
     parser.add_argument("--vae_model", type=str, default="stabilityai/sdxl-vae", help="Pretrained VAE model")
-    parser.add_argument("--hidden_size", type=int, default=2048, help="Hidden size for the decoder")
-    parser.add_argument("--z_step", type=int, default=128, help="Z step for decoder")
+    parser.add_argument("--hidden_size", type=int, default=1024, help="Hidden size for the decoder")
     parser.add_argument("--text_prompt_pooling_type", type=str, default="first", help="Pooling type for text prompts")
     parser.add_argument("--projector_hidden_act", type=str, default="gelu", help="Activation function for projectors")
     parser.add_argument("--reduction", type=str, default="mean", help="Reduction method for loss calculation")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for DataLoader")
-    parser.add_argument("--decoder_hidden_size", type=int, default=768, help="Hidden size for the decoder")
-    parser.add_argument("--decoder_num_hidden_layers", type=int, default=8, help="Number of hidden layers in the decoder")
-    parser.add_argument("--decoder_num_attention_heads", type=int, default=12, help="Number of attention heads in the decoder")
-    parser.add_argument("--decoder_intermediate_size", type=int, default=1536, help="Intermediate size for the decoder")
-    parser.add_argument("--decoder_max_position_embeddings", type=int, default=128, help="Max position embeddings for the decoder")
-    parser.add_argument("--decoder_rope_theta", type=int, default=4000, help="RoPE theta for the decoder")
     parser.add_argument("--fp16", type=bool, default=False, help="Use mixed precision training if available")
     parser.add_argument("--logging_steps", type=int, default=10, help="Number of steps between logging")
-    parser.add_argument("--save_steps", type=int, default=1000, help="Number of steps between saving checkpoints")
-    parser.add_argument("--eval_steps", type=int, default=1000, help="Number of steps between evaluations")
+    parser.add_argument("--save_steps", type=int, default=500, help="Number of steps between saving checkpoints")
+    parser.add_argument("--eval_steps", type=int, default=10000000, help="Number of steps between evaluations")
     parser.add_argument("--save_total_limit", type=int, default=2, help="Maximum number of checkpoints to keep")
     args = parser.parse_args()
 
