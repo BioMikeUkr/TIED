@@ -211,3 +211,5 @@ __marimo__/
 models
 /models
 artbench
+pretrained
+wikiart_dataset.json
