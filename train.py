@@ -47,6 +47,7 @@ def main(args):
         text_prompt_pooling_type=args.text_prompt_pooling_type,
         projector_hidden_act=args.projector_hidden_act,
         reduction=args.reduction,
+        n_pooling_tokens=args.n_pooling_tokens,
     )
 
     # Initialize the TIED model
@@ -111,22 +112,22 @@ def main(args):
 # checkpoint-267600
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, help="Name of the model to train", default=None)
-    parser.add_argument("--text_encoder_model", type=str, default="microsoft/deberta-v3-small", help="Pretrained text encoder model")
+    parser.add_argument("--model_name", type=str, help="Name of the model to train", default="checkpoint-36200")
+    parser.add_argument("--text_encoder_model", type=str, default="answerdotai/ModernBERT-base", help="Pretrained text encoder model")
     parser.add_argument("--train_data", type=str, help="Path to training data file", default= "wikiart_dataset.json")
     parser.add_argument("--save_path", type=str, help="Directory to save the model", default="models")
-    parser.add_argument("--n_pooling_tokens", type=int, default=3, help="Number of pooling tokens")
+    parser.add_argument("--n_pooling_tokens", type=int, default=4, help="Number of pooling tokens")
     parser.add_argument("--randomize_prompts", type=bool, default=True, help="Randomize prompts during training")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for training")
     parser.add_argument("--num_epochs", type=int, default=100, help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate for the optimizer")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate for the optimizer")
     parser.add_argument("--max_length", type=int, default=128, help="Maximum length of text sequences")
-    parser.add_argument("--image_size", type=int, default=256, help="Size of input images")
+    parser.add_argument("--image_size", type=int, default=128, help="Size of input images")
     parser.add_argument("--vae_model", type=str, default="stabilityai/sdxl-vae", help="Pretrained VAE model")
-    parser.add_argument("--hidden_size", type=int, default=4096, help="Hidden size for the decoder")
+    parser.add_argument("--hidden_size", type=int, default=3136, help="Hidden size for the decoder")
     parser.add_argument("--text_prompt_pooling_type", type=str, default="n_token", help="Pooling type for text prompts")
     parser.add_argument("--projector_hidden_act", type=str, default="gelu", help="Activation function for projectors")
-    parser.add_argument("--reduction", type=str, default="mean", help="Reduction method for loss calculation")
+    parser.add_argument("--reduction", type=str, default="sum", help="Reduction method for loss calculation")
     parser.add_argument("--num_workers", type=int, default=16, help="Number of workers for DataLoader")
     parser.add_argument("--fp16", type=bool, default=False, help="Use mixed precision training if available")
     parser.add_argument("--logging_steps", type=int, default=50, help="Number of steps between logging")

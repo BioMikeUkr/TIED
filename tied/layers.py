@@ -15,9 +15,9 @@ class Encoder2LatentProjector(nn.Module):
         out_spatial = config.image_size // (2 * num_down_blocks)
         out_size = out_spatial * out_spatial  # 16 * 16 = 256
 
-        self.linear_1 = nn.Linear(config.text_encoder_config.hidden_size * (1 + config.n_pooling_tokens), config.hidden_size//4)
+        self.linear_1 = nn.Linear(config.text_encoder_config.hidden_size, (config.text_encoder_config.hidden_size + out_size)//2)
         self.act = ACT2FN[config.projector_hidden_act]
-        self.linear_2 = nn.Linear(config.hidden_size//4, out_size)
+        self.linear_2 = nn.Linear((config.text_encoder_config.hidden_size + out_size)//2, out_size)
 
     def forward(self, features):  # [B, T, hidden]
         x = self.linear_1(features)
@@ -34,12 +34,29 @@ class Encoder2ChanelsProjector(nn.Module):
             Encoder2LatentProjector(config) for _ in range(self.latent_channels)
         ])
 
-    def forward(self, features):  # [B, T, hidden]
-        features = features.view(features.size(0), 1, -1)  # [B, T, hidden]
+    def forward(self, features):
         latents = [p(features) for p in self.projector]  # each: [B, T, H*W]
         latents = torch.stack(latents, dim=2)  # [B, C, T, H*W]
-        latents = latents.view(latents.size(0), latents.size(1), latents.size(2), self.spatial_size, self.spatial_size)        
-        return latents
+        latents = latents.view(latents.size(0), latents.size(1), latents.size(2), self.spatial_size, self.spatial_size)  # [B, C, T, H, W]
+
+        B, C, T, H, W = latents.shape
+        D = min(C, T)
+
+        batch_idx = torch.arange(B, device=latents.device).unsqueeze(1)  # [B, 1]
+        diag_idx = torch.arange(D, device=latents.device).unsqueeze(0)   # [1, D]
+
+        diag_latents = latents[batch_idx, diag_idx, diag_idx]  # [B, D, H, W]
+
+        # Вместо in-place присваивания — сформировать нужный тензор напрямую
+        padding = T - D
+        if padding > 0:
+            pad = torch.zeros(B, padding, H, W, device=latents.device, dtype=latents.dtype)
+            diag_latents = torch.cat([diag_latents, pad], dim=1)  # [B, T, H, W]
+
+        zero_latents = diag_latents.unsqueeze(1)  # [B, 1, T, H, W]
+
+        return zero_latents
+
 
 class FeaturesProjector(nn.Module):
     def __init__(self, config: TIEDModelConfig, in_dim, out_dim, hidden_dim):

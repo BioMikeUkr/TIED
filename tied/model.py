@@ -48,15 +48,15 @@ class TIEDModel(PreTrainedModel):
         self.text_prompt_pooling_type = config.text_prompt_pooling_type
         self.projector_hidden_act = ACT2FN[config.projector_hidden_act]
         self.visual_tokens_projector = FeaturesProjector(
-            config, in_dim=config.text_encoder_config.hidden_size * (1 + config.n_pooling_tokens),
-            out_dim=config.text_encoder_config.hidden_size * (1 + config.n_pooling_tokens),
+            config, in_dim=config.text_encoder_config.hidden_size * 2,
+            out_dim=config.text_encoder_config.hidden_size,
             hidden_dim=config.hidden_size
         )
         self.encoder2chanels_projector = Encoder2ChanelsProjector(config)
 
         self.pooler  = POOLING2OBJECT[config.text_prompt_pooling_type](config.n_pooling_tokens)
 
-        self.dropout = torch.nn.Dropout(0.2)
+        self.dropout = torch.nn.Dropout(0.00)
 
 
     def save_pretrained(self, save_directory, **kwargs):
@@ -138,6 +138,25 @@ class TIEDModel(PreTrainedModel):
         latents = self.vae.encode(input_images).latent_dist.sample().unsqueeze(1)
 
         return latents
+
+    def prepare_inputs_for_channels(self, embeds: torch.Tensor) -> torch.Tensor:
+        b, t, h = embeds.shape
+
+        first_token = embeds[:, 0, :].unsqueeze(1)  # [B, 1, H]
+
+        pairs = []
+        for i in range(1, self.config.n_pooling_tokens + 1):
+            ith_token = embeds[:, i, :].unsqueeze(1)  # [B, 1, H]
+            pair = torch.cat([first_token, ith_token], dim=-1)  # [B, 1, 2H]
+            pairs.append(pair)
+
+        pooled_features = torch.cat(pairs, dim=1)  # [B, N, 2H]
+  
+        pooled_features = self.visual_tokens_projector(pooled_features)  # project to final dim
+        pooled_features = self.dropout(pooled_features) 
+
+        return pooled_features
+
     
     def forward(self, input_ids=None, attention_mask=None, input_images=None, **kwargs):
 
@@ -149,10 +168,7 @@ class TIEDModel(PreTrainedModel):
 
         # Pool text features
         pooled_features = self.pooler(text_features)
-        pooled_features = pooled_features.view(pooled_features.size(0), -1)
-
-        pooled_features = self.visual_tokens_projector(pooled_features)  # [B, T, hidden]
-        pooled_features = self.dropout(pooled_features)
+        pooled_features = self.prepare_inputs_for_channels(pooled_features)
 
         encoded_latents = self.encoder2chanels_projector(pooled_features)
 
