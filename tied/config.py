@@ -9,6 +9,7 @@ class TIEDModelConfig(PretrainedConfig):
         self,
         text_encoder_config=None,
         text_encoder_model=None,
+        train_vae_only=False,
         vae_model=None,
         vae_config=None,
         image_size=256,
@@ -28,6 +29,7 @@ class TIEDModelConfig(PretrainedConfig):
             raise ValueError("text_encoder_config must be dict or PretrainedConfig")
 
         self.reduction = reduction
+        self.train_vae_only = train_vae_only
         self.n_pooling_tokens = n_pooling_tokens
         self.image_size = image_size
         self.hidden_size = hidden_size

@@ -1,6 +1,5 @@
 from tied import TIEDModel, TIEDModelConfig
 from transformers import AutoConfig, LlamaConfig, AutoTokenizer
-from transformers import TrainingArguments
 from diffusers import AutoencoderKL
 from tied.data_processing import TIEDDataset
 from torch.utils.data import DataLoader
@@ -12,7 +11,7 @@ import os
 from datasets import load_dataset
 import torchvision.transforms as transforms
 import argparse
-from tied.training import TIEDTrainer
+from tied.training import TIEDTrainer, TrainingArguments
 
 def safe_collate(batch):
     batch = [x for x in batch if isinstance(x, dict) and "pixel_values" in x]
@@ -38,6 +37,7 @@ def main(args):
     # Create TIED model configuration
     config = TIEDModelConfig(
         text_encoder_model=args.text_encoder_model,
+        train_vae_only=args.train_vae_only,
         text_encoder_config=text_encoder_config,
         vae_model=args.vae_model,
         vae_config=vae.config,
@@ -52,12 +52,12 @@ def main(args):
 
     # Initialize the TIED model
     if args.model_name:
-        model = TIEDModel.from_pretrained(args.model_name, reduction=args.reduction).to(device)
+        model = TIEDModel.from_pretrained(args.model_name, reduction=args.reduction, train_vae_only=args.train_vae_only).to(device)
         tokenizer = AutoTokenizer.from_pretrained(args.model_name, add_prefix_space=True)
     else:
         model = TIEDModel(config).to(device)
 
-    if args.n_pooling_tokens is not None:
+    if args.n_pooling_tokens is not None and args.n_pooling_tokens > 0:
             new_words = ["<<VISUAL_TOKEN>>"]
             tokenizer.add_tokens(new_words, special_tokens=True)
             model.resize_token_embeddings(len(tokenizer))
@@ -91,12 +91,15 @@ def main(args):
         output_dir=args.save_path,
         per_device_train_batch_size=args.batch_size,
         num_train_epochs=args.num_epochs,
-        learning_rate=args.learning_rate,
+        learning_rate=args.others_lr,
+        text_encoder_lr=args.text_encoder_lr,
+        inner_vae_lr=args.inner_vae_lr,
+        others_lr=args.others_lr,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
         fp16=args.fp16,
-        lr_scheduler_type="cosine"
+        lr_scheduler_type="cosine",
     )
 
     trainer = TIEDTrainer(
@@ -112,20 +115,26 @@ def main(args):
 # checkpoint-267600
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, help="Name of the model to train", default="checkpoint-36200")
+    parser.add_argument("--model_name", type=str, help="Name of the model to train", default=None)
     parser.add_argument("--text_encoder_model", type=str, default="answerdotai/ModernBERT-base", help="Pretrained text encoder model")
     parser.add_argument("--train_data", type=str, help="Path to training data file", default= "wikiart_dataset.json")
     parser.add_argument("--save_path", type=str, help="Directory to save the model", default="models")
-    parser.add_argument("--n_pooling_tokens", type=int, default=4, help="Number of pooling tokens")
+    parser.add_argument("--n_pooling_tokens", type=int, default=0, help="Number of pooling tokens")
     parser.add_argument("--randomize_prompts", type=bool, default=True, help="Randomize prompts during training")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for training")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--num_epochs", type=int, default=100, help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate for the optimizer")
+
+    parser.add_argument("--train_vae_only", type=bool, default=False, help="Train only the VAE")
+
+    parser.add_argument("--text_encoder_lr", type=float, default=5e-6, help="Learning rate for the optimizer")
+    parser.add_argument("--inner_vae_lr", type=float, default=3e-4, help="Learning rate for the optimizer")
+    parser.add_argument("--others_lr", type=float, default=1e-5, help="Learning rate for the optimizer")
+
     parser.add_argument("--max_length", type=int, default=128, help="Maximum length of text sequences")
     parser.add_argument("--image_size", type=int, default=128, help="Size of input images")
     parser.add_argument("--vae_model", type=str, default="stabilityai/sdxl-vae", help="Pretrained VAE model")
-    parser.add_argument("--hidden_size", type=int, default=3136, help="Hidden size for the decoder")
-    parser.add_argument("--text_prompt_pooling_type", type=str, default="n_token", help="Pooling type for text prompts")
+    parser.add_argument("--hidden_size", type=int, default=768, help="Hidden size for the decoder")
+    parser.add_argument("--text_prompt_pooling_type", type=str, default="first", help="Pooling type for text prompts")
     parser.add_argument("--projector_hidden_act", type=str, default="gelu", help="Activation function for projectors")
     parser.add_argument("--reduction", type=str, default="sum", help="Reduction method for loss calculation")
     parser.add_argument("--num_workers", type=int, default=16, help="Number of workers for DataLoader")

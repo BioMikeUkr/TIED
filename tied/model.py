@@ -16,13 +16,16 @@ from safetensors.torch import save_file, load_file
 from huggingface_hub import create_repo, upload_folder, hf_hub_download
 
 from .config import TIEDModelConfig
-from .layers import Encoder2ChanelsProjector, FeaturesProjector
+from .layers import Encoder2ChanelsProjector, FeaturesProjector, LatentVAE
 from .pooling import POOLING2OBJECT
 
 @dataclass
 class TIEDModelOutput(BaseModelOutput):
-   encoded_latents: torch.Tensor = None
-   loss: Optional[torch.Tensor] = None
+    encoded_latents: torch.Tensor = None
+    loss: Optional[torch.Tensor] = None
+    recon_loss: Optional[torch.Tensor] = None
+    kld: Optional[torch.Tensor] = None
+    mse_align: Optional[torch.Tensor] = None
 
 
 class TIEDModel(PreTrainedModel):
@@ -47,16 +50,18 @@ class TIEDModel(PreTrainedModel):
         self.vocab_size = config.vocab_size
         self.text_prompt_pooling_type = config.text_prompt_pooling_type
         self.projector_hidden_act = ACT2FN[config.projector_hidden_act]
+        
         self.visual_tokens_projector = FeaturesProjector(
-            config, in_dim=config.text_encoder_config.hidden_size * 2,
-            out_dim=config.text_encoder_config.hidden_size,
-            hidden_dim=config.hidden_size
+            config, in_dim=config.text_encoder_config.hidden_size,
+            out_dim=config.hidden_size,
+            hidden_dim=config.hidden_size * 2
         )
-        self.encoder2chanels_projector = Encoder2ChanelsProjector(config)
 
         self.pooler  = POOLING2OBJECT[config.text_prompt_pooling_type](config.n_pooling_tokens)
 
-        self.dropout = torch.nn.Dropout(0.00)
+        self.dropout = torch.nn.Dropout(0.0)
+
+        self.inner_vae = LatentVAE(config)
 
 
     def save_pretrained(self, save_directory, **kwargs):
@@ -127,57 +132,94 @@ class TIEDModel(PreTrainedModel):
         self.config.text_encoder_config.vocab_size = model_embeds.num_embeddings
         return model_embeds
     
-    def get_loss(self, x, y):
-        mse = F.mse_loss(x, y, reduction=self.config.reduction)
-        return mse
+    def get_loss(self, text_z, z, recon, mu, logvar, true_latents, input_images=None):
+        cfg = self.config
+        alpha = getattr(cfg, "inner_recon_weight", 0.3)
+        beta = getattr(cfg, "beta", 0.5)
+        gamma = getattr(cfg, "mse_weight", 6.0)
+        delta = getattr(cfg, "main_recon_weight", 1.0)
+
+        batch_size = recon.size(0)
+        
+        decoded = self.vae.decode(recon).sample
+        main_recon_loss = F.mse_loss(decoded, input_images, reduction="sum") / batch_size
+        inner_recon_loss = F.mse_loss(recon, true_latents, reduction="sum") / batch_size
+        mse_align = F.mse_loss(text_z, z, reduction="sum") / batch_size
+
+        kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / batch_size
+
+        inner_recon_loss = alpha * inner_recon_loss
+        main_recon_loss = delta * main_recon_loss
+        kld = beta * kld
+        mse_align = gamma * mse_align
+
+        loss = inner_recon_loss + main_recon_loss + kld + mse_align
+
+        return loss, {
+            "recon_loss": main_recon_loss.detach() + inner_recon_loss.detach(),
+            "kld": kld.detach(),
+            "mse_align": mse_align.detach()
+        }
+
 
     def get_diffused_latents(self, input_images: torch.Tensor) -> torch.Tensor:
         if input_images.dim() != 4:
             raise ValueError("Expected input_images of shape (B, 3, H, W)")
 
-        latents = self.vae.encode(input_images).latent_dist.sample().unsqueeze(1)
+        latents = self.vae.encode(input_images).latent_dist.sample()
 
         return latents
+    
+    def vaes_forward(self, input_images: torch.Tensor) -> torch.Tensor:
+        if input_images.dim() != 4:
+            raise ValueError("Expected input_images of shape (B, 3, H, W)")
 
-    def prepare_inputs_for_channels(self, embeds: torch.Tensor) -> torch.Tensor:
-        b, t, h = embeds.shape
+        true_latents = self.get_diffused_latents(input_images)
+        recon, mu, logvar, z = self.inner_vae(true_latents)
+        batch_size = recon.size(0)
+        recon_loss = F.mse_loss(recon, true_latents, reduction="sum") / batch_size
 
-        first_token = embeds[:, 0, :].unsqueeze(1)  # [B, 1, H]
+        kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / batch_size
+        loss = recon_loss + kld
 
-        pairs = []
-        for i in range(1, self.config.n_pooling_tokens + 1):
-            ith_token = embeds[:, i, :].unsqueeze(1)  # [B, 1, H]
-            pair = torch.cat([first_token, ith_token], dim=-1)  # [B, 1, 2H]
-            pairs.append(pair)
-
-        pooled_features = torch.cat(pairs, dim=1)  # [B, N, 2H]
-  
-        pooled_features = self.visual_tokens_projector(pooled_features)  # project to final dim
-        pooled_features = self.dropout(pooled_features) 
-
-        return pooled_features
-
+        return TIEDModelOutput(
+                    encoded_latents=None,
+                    loss=loss,
+                    recon_loss=recon_loss,
+                    kld=kld,
+                    mse_align=kld
+                )
     
     def forward(self, input_ids=None, attention_mask=None, input_images=None, **kwargs):
 
         if input_ids is None:
             raise ValueError("input_ids must be provided")
+        
+        if self.config.train_vae_only and input_images is not None:
+            return self.vaes_forward(input_images)
 
         # Encode text
         text_features = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
-
+        
         # Pool text features
         pooled_features = self.pooler(text_features)
-        pooled_features = self.prepare_inputs_for_channels(pooled_features)
-
-        encoded_latents = self.encoder2chanels_projector(pooled_features)
+        text_z = self.visual_tokens_projector(pooled_features)
+        encoded_latents = self.inner_vae.decode(text_z)
 
         loss = None
         if input_images is not None:
             true_latents = self.get_diffused_latents(input_images)
-            loss = self.get_loss(encoded_latents, true_latents)
-        return TIEDModelOutput(
-            encoded_latents=encoded_latents,
-            loss=loss
-        )
+            recon, mu, logvar, z = self.inner_vae(true_latents)
+            loss, metrics = self.get_loss(text_z, z, recon, mu, logvar, true_latents, input_images)
+            return TIEDModelOutput(
+                encoded_latents=encoded_latents,
+                loss=loss,
+                recon_loss=metrics["recon_loss"],
+                kld=metrics["kld"],
+                mse_align=metrics["mse_align"]
+            )
+        else:
+            return TIEDModelOutput(
+                encoded_latents=encoded_latents
+            )
 
