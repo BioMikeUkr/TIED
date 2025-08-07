@@ -1,0 +1,213 @@
+from tied import TIEDModel, TIEDModelConfig
+from transformers import AutoConfig, LlamaConfig, AutoTokenizer, AutoModel
+from diffusers import AutoencoderKL
+from tied.data_processing import TIEDDataset
+from torch.utils.data import DataLoader
+from torch.utils.data._utils.collate import default_collate
+import torch
+import json
+import random
+import copy
+import os
+from datasets import load_dataset
+import torchvision.transforms as transforms
+import argparse
+from tied.training import TIEDTrainer, TrainingArguments
+from pretrained.tied_copy import TIEDModel as OldTIEDModel
+
+def safe_collate(batch):
+    batch = [x for x in batch if isinstance(x, dict) and "pixel_values" in x]
+    if len(batch) == 0:
+        raise RuntimeError("All examples in batch missing 'pixel_values'")
+
+    return {
+        "input_ids": torch.stack([x["input_ids"] for x in batch]),
+        "attention_mask": torch.stack([x["attention_mask"] for x in batch]),
+        "pixel_values": torch.stack([x["pixel_values"].squeeze(0) for x in batch])  # remove unsqueeze(0)
+    }
+
+
+
+def main(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Load VAE model
+    vae = AutoencoderKL.from_pretrained(args.vae_model)
+
+    text_encoder_config = AutoConfig.from_pretrained(args.text_encoder_model).to_dict()
+
+    tokenizer = AutoTokenizer.from_pretrained(args.text_encoder_model)
+    # Create TIED model configuration
+
+    decoder_config = LlamaConfig(
+        vocab_size=1,
+        hidden_size=args.decoder_hidden_size,
+        num_hidden_layers=args.decoder_num_hidden_layers,
+        num_attention_heads=args.decoder_num_attention_heads,
+        intermediate_size=args.decoder_intermediate_size,
+        max_position_embeddings=args.decoder_max_position_embeddings,
+        rope_theta=args.decoder_rope_theta
+    )
+
+    config = TIEDModelConfig(
+        text_encoder_model=args.text_encoder_model,
+        text_encoder_config=text_encoder_config,
+        vae_model=args.vae_model,
+        vae_config=vae.config,
+
+        train_vae=args.train_vae,
+        train_text_encoder=args.train_text_encoder,
+        train_decoder=args.train_decoder,
+        train_vae_decoder = args.train_vae_decoder,
+
+        decoder_config = decoder_config,
+        decoder_hidden_size = args.decoder_hidden_size,
+        span_size = args.span_size,
+
+        vocab_size=1,
+        image_size=args.image_size,
+        hidden_size=args.hidden_size,
+        text_prompt_pooling_type=args.text_prompt_pooling_type,
+        projector_hidden_act=args.projector_hidden_act,
+        reduction=args.reduction,
+    )
+
+    # Initialize the TIED model
+    if args.model_name:
+        model = TIEDModel.from_pretrained(
+            args.model_name,
+            reduction=args.reduction,
+            train_vae=args.train_vae,
+            train_text_encoder=args.train_text_encoder,
+            train_decoder=args.train_decoder, 
+            train_vae_decoder = args.train_vae_decoder
+            ).to(device)
+        
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name, add_prefix_space=True)
+    else:
+        model = TIEDModel(config).to(device)
+
+    old_model = OldTIEDModel.from_pretrained("pretrained/checkpoint-86500")
+
+    model.inner_vae = copy.deepcopy(old_model.inner_vae)
+    model.text_encoder = copy.deepcopy(old_model.text_encoder)
+    model.encoder2latent_proj = copy.deepcopy(old_model.visual_tokens_projector)
+    model.to(device)
+
+    # Load dataset
+    try:
+        dataset = json.load(open(args.train_data, 'r'))
+    except Exception as e:
+        dataset = load_dataset(args.train_data, split='train')
+        dataset = list(dataset)
+
+    random.seed(42)
+    random.shuffle(dataset)
+    # Define image transformations
+    image_transform = transforms.Compose([
+        transforms.Resize((args.image_size, args.image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+    ])
+
+    train_dataset = TIEDDataset(
+        data=dataset,
+        image_transform=image_transform,
+        tokenizer=tokenizer,
+        max_length=args.max_length,
+        randomize_prompts=args.randomize_prompts,
+    )
+    # Create DataLoader
+    training_args = TrainingArguments(
+        remove_unused_columns=False,
+        output_dir=args.save_path,
+        per_device_train_batch_size=args.batch_size,
+        num_train_epochs=args.num_epochs,
+        learning_rate=args.others_lr,
+        text_encoder_lr=args.text_encoder_lr,
+        inner_vae_lr=args.inner_vae_lr,
+        others_lr=args.others_lr,
+        decoder_lr = args.others_lr,
+        train_vae=args.train_vae,
+        train_text_encoder=args.train_text_encoder,
+        train_decoder=args.train_decoder,
+        train_vae_decoder = args.train_vae_decoder,
+        logging_steps=args.logging_steps,
+        save_steps=args.save_steps,
+        save_total_limit=args.save_total_limit,
+        fp16=args.fp16,
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.0005
+    )
+
+    trainer = TIEDTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        processing_class=tokenizer,
+        data_collator=safe_collate,
+    )
+
+    # Start training
+    trainer.train()
+# checkpoint-267600
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    
+    # Model paths and names
+    parser.add_argument("--model_name", type=str, help="Name of the model to train", default=None)
+    parser.add_argument("--text_encoder_model", type=str, default="answerdotai/ModernBERT-base", help="Pretrained text encoder model")
+    parser.add_argument("--vae_model", type=str, default="stabilityai/sdxl-vae", help="Pretrained VAE model")
+    
+    # Data
+    parser.add_argument("--train_data", type=str, help="Path to training data file", default="wikiart_dataset.json")
+    parser.add_argument("--save_path", type=str, help="Directory to save the model", default="models")
+    
+    # Model architecture
+    parser.add_argument("--hidden_size", type=int, default=2048, help="Hidden size for the model")
+    parser.add_argument("--span_size", type=int, default=16, help="Size of spans for decoder")
+    parser.add_argument("--text_prompt_pooling_type", type=str, default="first", help="Pooling type for text prompts")
+    parser.add_argument("--projector_hidden_act", type=str, default="gelu", help="Activation function for projectors")
+    parser.add_argument("--reduction", type=str, default="sum", help="Reduction method for loss calculation")
+    
+    # Decoder configuration
+    parser.add_argument("--decoder_hidden_size", type=int, default=16, help="Hidden size for the decoder")
+    parser.add_argument("--decoder_num_hidden_layers", type=int, default=6, help="Number of hidden layers in decoder")
+    parser.add_argument("--decoder_num_attention_heads", type=int, default=4, help="Number of attention heads in decoder")
+    parser.add_argument("--decoder_intermediate_size", type=int, default=32, help="Intermediate size in decoder FFN")
+    parser.add_argument("--decoder_max_position_embeddings", type=int, default=4096, help="Maximum position embeddings for decoder")
+    parser.add_argument("--decoder_rope_theta", type=float, default=12000, help="RoPE theta for decoder")
+    
+    # Training configuration
+    parser.add_argument("--randomize_prompts", type=bool, default=True, help="Randomize prompts during training")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for training")
+    parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs")
+    parser.add_argument("--max_length", type=int, default=128, help="Maximum length of text sequences")
+    parser.add_argument("--image_size", type=int, default=256, help="Size of input images")
+    
+    # Training modes
+    parser.add_argument("--train_vae", type=bool, default=False, help="Train VAE")
+    parser.add_argument("--train_text_encoder", type=bool, default=True, help="Train text encoder")
+    parser.add_argument("--train_decoder", type=bool, default=True, help="Train decoder")
+    parser.add_argument("--train_vae_decoder", type=bool, default=False, help="Train VAE decoder")
+    
+    # Learning rates
+    parser.add_argument("--text_encoder_lr", type=float, default=1e-5, help="Learning rate for text encoder")
+    parser.add_argument("--inner_vae_lr", type=float, default=3e-4, help="Learning rate for inner VAE")
+    parser.add_argument("--others_lr", type=float, default=3e-5, help="Learning rate for other components")
+    parser.add_argument("--decoder_lr", type=float, default=3e-5, help="Learning rate for decoder")
+    
+    # Training utilities
+    parser.add_argument("--num_workers", type=int, default=16, help="Number of workers for DataLoader")
+    parser.add_argument("--fp16", type=bool, default=False, help="Use mixed precision training if available")
+    parser.add_argument("--logging_steps", type=int, default=10, help="Number of steps between logging")
+    parser.add_argument("--save_steps", type=int, default=500, help="Number of steps between saving checkpoints")
+    parser.add_argument("--eval_steps", type=int, default=10000000, help="Number of steps between evaluations")
+    parser.add_argument("--save_total_limit", type=int, default=2, help="Maximum number of checkpoints to keep")
+    
+    args = parser.parse_args()
+
+    # Ensure save path exists
+    if not os.path.exists(args.save_path):
+        os.makedirs(args.save_path)
+    # Start the training process
+    main(args)

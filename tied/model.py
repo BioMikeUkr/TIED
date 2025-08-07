@@ -1,6 +1,7 @@
 import os
 import tempfile
 import torch
+import torch.nn.functional as F
 from typing import Optional, Union
 from dataclasses import dataclass
 from transformers import (
@@ -8,22 +9,27 @@ from transformers import (
 )
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.activations import ACT2FN
+from diffusers import AutoencoderKL
+
+import lpips
+import piq
+
 from safetensors.torch import save_file, load_file
 from huggingface_hub import create_repo, upload_folder, hf_hub_download
 
 from .config import TIEDModelConfig
-from .layers import Encoder2DecoderProjector, Decoder2ChanelsProjector, Chanels2DecoderProjector
+from .layers import LowLevelVectorLatentVAE, FeaturesProjector
 from .pooling import POOLING2OBJECT
 
 @dataclass
 class TIEDModelOutput(BaseModelOutput):
-   decoded_latents: torch.Tensor = None
-   loss: Optional[torch.Tensor] = None
+    generated_latents: torch.Tensor = None
+    loss: Optional[torch.Tensor] = None
 
 
 class TIEDModel(PreTrainedModel):
     config_class = TIEDModelConfig
-    base_model_prefix = "model"
+    base_model_prefix = "tied model"
     supports_gradient_checkpointing = True
 
     def __init__(self, config: TIEDModelConfig, device="cpu"):
@@ -32,24 +38,42 @@ class TIEDModel(PreTrainedModel):
         self.text_encoder = AutoModel.from_config(config.text_encoder_config)
         self.decoder = AutoModelForCausalLM.from_config(config.decoder_config)
 
-        from diffusers import AutoencoderKL
         if not config.vae_model:
             raise ValueError("vae_model must be specified in config")
 
         self.vae = AutoencoderKL.from_pretrained(config.vae_model)
-        for p in self.vae.parameters():
-            p.requires_grad = False
 
         self.vocab_size = config.vocab_size
         self.text_prompt_pooling_type = config.text_prompt_pooling_type
         self.projector_hidden_act = ACT2FN[config.projector_hidden_act]
 
-        self.encoder2decoder_projector = Encoder2DecoderProjector(config)
-        self.decoder2chanels_projector = Decoder2ChanelsProjector(config)
-        self.chanels2decoder_projector = Chanels2DecoderProjector(config)
+        self.encoder2latent_proj = FeaturesProjector(
+            config, in_dim=config.text_encoder_config.hidden_size,
+            out_dim=config.hidden_size,
+            hidden_dim=config.hidden_size * 2
+        )
+
+        self.decoder2latent_proj = FeaturesProjector(
+            config, in_dim=config.decoder_hidden_size,
+            out_dim=1,
+            hidden_dim=config.hidden_size // 2
+        )
 
         self.pooler  = POOLING2OBJECT[config.text_prompt_pooling_type]()
+        self.dropout = torch.nn.Dropout(0.0)
 
+        self.inner_vae = LowLevelVectorLatentVAE(config)
+
+        self._lpips_fn = None
+
+    @property
+    def lpips_fn(self):
+        if self._lpips_fn is None:
+            self._lpips_fn = lpips.LPIPS(net='vgg').to(self.device)
+            self._lpips_fn.eval()
+            for p in self._lpips_fn.parameters():
+                p.requires_grad = False
+        return self._lpips_fn
 
     def save_pretrained(self, save_directory, **kwargs):
         os.makedirs(save_directory, exist_ok=True)
@@ -80,7 +104,6 @@ class TIEDModel(PreTrainedModel):
             pretrained_model_name_or_path, config=config.decoder_config, subfolder="decoder"
         )
 
-        from diffusers import AutoencoderKL
         try:
             model.vae = AutoencoderKL.from_pretrained(
                 pretrained_model_name_or_path, subfolder="vae"
@@ -119,42 +142,23 @@ class TIEDModel(PreTrainedModel):
             repo_type="model"
         )
 
-    def get_diffused_latents(self, input_images: torch.Tensor) -> torch.Tensor:
-        steps = self.config.z_step
-
+    def get_latents(self, input_images: torch.Tensor) -> torch.Tensor:
         if input_images.dim() != 4:
             raise ValueError("Expected input_images of shape (B, 3, H, W)")
 
         latents = self.vae.encode(input_images).latent_dist.sample()
-        
-        betas = torch.linspace(1e-4, 0.3, steps, device=latents.device, dtype=latents.dtype)
-        alphas = 1.0 - betas
-        alpha_bars = torch.cumprod(alphas, dim=0)
 
-        all_noised_latents = []
-
-        for i in range(steps):
-            alpha_bar = alpha_bars[i]
-            noise = torch.randn_like(latents)
-            noised_latent = torch.sqrt(alpha_bar) * latents + torch.sqrt(1 - alpha_bar) * noise
-            all_noised_latents.append(noised_latent)
-
-        return torch.stack(all_noised_latents[::-1], dim=1)
+        return latents
     
     def get_prompt_embeddings(self, input_ids, attention_mask=None):
         if input_ids is None:
             raise ValueError("input_ids must be provided")
 
-        # Encode text
         text_features = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
 
-        # Pool text features
         pooled_features = self.pooler(text_features)
 
-        # Project to decoder space
-        decoder_features = self.encoder2decoder_projector(pooled_features)
-
-        return decoder_features
+        return self.encoder2latent_proj(pooled_features)
     
     def construct_decoder_inputs(self, prompts, input_images):
         if input_images is not None:
@@ -188,88 +192,152 @@ class TIEDModel(PreTrainedModel):
             "latent_labels": latents
         }
     
+    def prepare_latent_for_decoder(self, latent: torch.Tensor):
+        b, d = latent.size()
+        
+        random_start_spans = torch.zeros(
+            (b, self.config.span_size),
+            device=latent.device,
+            dtype=latent.dtype
+        )
+        latent = torch.cat([random_start_spans, latent], dim=1)
 
-    def decode_prompts(self, inputs_embeds, attention_mask=None):
-        if inputs_embeds is None:
-            raise ValueError("inputs_embeds must be provided")
+        spans = latent.unfold(
+            dimension=1, 
+            size=self.config.span_size,
+            step=1
+        )
+        
+        return spans
 
-        # Decode using the decoder model
+    def forward(self, input_ids=None, attention_mask=None, input_images=None, **kwargs):
+        text_latents = self.get_prompt_embeddings(input_ids, attention_mask)
+        image_latent = self.get_latents(input_images)
+
+        u, recon, mu, logvar, z = self.inner_vae(image_latent)
+        image_latent = u
+
+        prompt = self.prepare_latent_for_decoder(text_latents)
+        latent = self.prepare_latent_for_decoder(image_latent)
+        # print("text_latents", prompt.size())
+        # print("image_latent", latent.size())
+        input_embeds = torch.cat([prompt, latent[:,:-1, : ]], dim=1)
+        # print("input_embeds", input_embeds.size())
+        attention_mask = torch.ones(
+            (input_embeds.size(0), input_embeds.size(1)),
+            device=input_embeds.device
+        )
+
         decoder_outputs = self.decoder(
-            inputs_embeds=inputs_embeds,
+            inputs_embeds=input_embeds,
             attention_mask=attention_mask,
             return_dict=True,
             output_hidden_states=True
         )
+        b = latent.size(0)
+        generated_latent = self.decoder2latent_proj(decoder_outputs.hidden_states[-1][:,self.config.hidden_size + 1:, :]).view(b, -1)
+        # print("u ", u.size())
+        # print("generated_latent ", generated_latent.size())
+        loss = self.get_loss(generated_latent, u)
 
-        # Project to latent space
-        latent_features = self.decoder2chanels_projector(decoder_outputs.hidden_states[-1])
-
-        return latent_features
+        return TIEDModelOutput(
+                generated_latents=generated_latent,
+                loss=loss,
+            )
 
     def get_loss(self, x, y):
-        if x is None or y is None:
-            raise ValueError("Both x and y must be provided for loss calculation")
+        return F.smooth_l1_loss(x, y, reduction="sum") / x.size(0)
 
-        # Calculate the loss between the decoded latents and the input images
-        loss = torch.nn.functional.mse_loss(x, y, reduction=self.config.reduction)
-        return loss
-    
-    def forward(self, input_ids=None, attention_mask=None, input_images=None, **kwargs):
+
+    def generate(self, input_ids=None, attention_mask=None, target_length=2048, max_new_tokens=None):
+
         if input_ids is None:
             raise ValueError("input_ids must be provided")
-        prompts = self.get_prompt_embeddings(input_ids, attention_mask)
-        decoder_inputs = self.construct_decoder_inputs(prompts, input_images)
-
-        decoded_latents = self.decode_prompts(
-            inputs_embeds=decoder_inputs["inputs_embeds"],
-            attention_mask=decoder_inputs["attention_mask"]
+        
+        device = input_ids.device
+        batch_size = input_ids.size(0)
+        
+        text_latents = self.get_prompt_embeddings(input_ids, attention_mask)
+        prompt_spans = self.prepare_latent_for_decoder(text_latents)
+        
+        if max_new_tokens is not None:
+            target_length = max_new_tokens
+        
+        print(f"Generating latent of length {target_length}")
+        print(f"prompt_spans.shape: {prompt_spans.shape}")
+        
+        generated_values = []
+        
+        current_latent_spans = torch.zeros(
+            (batch_size, 0, self.config.span_size),
+            device=device,
+            dtype=text_latents.dtype
         )
-
-        loss = None
-        if input_images is not None:
-            loss = self.get_loss(decoder_inputs["latent_labels"], decoded_latents)
-        return TIEDModelOutput(
-            decoded_latents=decoded_latents,
-            loss=loss
-        )
-    
-    def generate(self, input_ids=None, attention_mask=None):
-        if input_ids is None:
-            raise ValueError("input_ids must be provided")
-
-        prompt_embed = self.get_prompt_embeddings(input_ids, attention_mask)
-        batch_size, hidden_size = prompt_embed.shape
-        z_steps = self.config.z_step
-
-        inputs_embeds = prompt_embed.unsqueeze(1)
-        attention_mask = torch.ones((batch_size, 1), device=prompt_embed.device, dtype=torch.long)
-        decoded_latents = []
-
-        for _ in range(1, z_steps):
-            decoder_outputs = self.decoder(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                return_dict=True,
-                output_hidden_states=True
+        
+        for step in range(target_length):
+            new_span = torch.zeros(
+                (batch_size, 1, self.config.span_size),
+                device=device,
+                dtype=text_latents.dtype
             )
-            decoded_latent = self.decoder2chanels_projector(decoder_outputs.hidden_states[:, -1, :])
+            current_latent_spans = torch.cat([current_latent_spans, new_span], dim=1)
+            
+            input_embeds = torch.cat([prompt_spans, current_latent_spans[:, :-1, :]], dim=1)
+            
+            attention_mask_tensor = torch.ones(
+                (input_embeds.size(0), input_embeds.size(1)),
+                device=device
+            )
+            
+            with torch.no_grad():
+                decoder_outputs = self.decoder(
+                    inputs_embeds=input_embeds,
+                    attention_mask=attention_mask_tensor,
+                    return_dict=True,
+                    output_hidden_states=True
+                )
+            
+            latent_hidden = decoder_outputs.hidden_states[-1][:, self.config.hidden_size + 1:, :]
+            
+            if latent_hidden.size(1) > 0:
+                last_hidden = latent_hidden[:, -1:, :]  # [batch, 1, decoder_hidden_size]
+                generated_value = self.decoder2latent_proj(last_hidden).squeeze(-1)  # [batch, 1]
+                generated_values.append(generated_value)
+            else:
+                generated_values.append(torch.zeros((batch_size, 1), device=device))
+            
+            if (step + 1) % 100 == 0:
+                print(f"Generated {step + 1}/{target_length} values")
+        
+        if generated_values:
+            final_latent = torch.cat(generated_values, dim=1)  # [batch, target_length]
+            print(f"Generated latent shape: {final_latent.shape}")
+            return final_latent
+        else:
+            print("No values generated")
+            return torch.zeros((batch_size, target_length), device=device, dtype=text_latents.dtype)
 
-            next_input_embed = self.chanels2decoder_projector(decoded_latent)
-
-            inputs_embeds = torch.cat([inputs_embeds, next_input_embed], dim=1)
-            attention_mask = torch.cat([attention_mask, torch.ones((batch_size, 1), device=attention_mask.device)], dim=1)
-            decoded_latents.append(decoded_latent)
-
-        # Final decoding to get latents
-        final_decoder_outputs = self.decoder(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            return_dict=True,
-            output_hidden_states=True
+    def generate_image(self, input_ids=None, attention_mask=None, target_length=2048):
+        generated_latent = self.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask, 
+            target_length=target_length
         )
-        decoded_latent = self.decoder2chanels_projector(final_decoder_outputs.hidden_states[:, -1, :])
-        decoded_latents.append(decoded_latent)
-        decoded_latents = torch.stack(decoded_latents, dim=1)
-
-        return decoded_latents
-
+        
+        print(f"Generated latent for image: {generated_latent.shape}")
+        
+        with torch.no_grad():
+            if hasattr(self.inner_vae, 'decode'):
+                vae_latents = self.inner_vae.decode(generated_latent)
+            elif hasattr(self.inner_vae, 'decoder'):
+                vae_latents = self.inner_vae.decoder(generated_latent)
+            else:
+                _, vae_latents, _, _, _ = self.inner_vae(generated_latent)
+            
+            print(f"VAE latents shape: {vae_latents.shape}")
+            
+            generated_image = self.vae.decode(vae_latents).sample
+            
+            print(f"Generated image shape: {generated_image.shape}")
+        
+        return generated_image

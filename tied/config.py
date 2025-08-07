@@ -9,13 +9,18 @@ class TIEDModelConfig(PretrainedConfig):
         self,
         text_encoder_config=None,
         text_encoder_model=None,
+        train_vae=True,
+        train_text_encoder=True,
+        train_decoder=True,
         vae_model=None,
+        train_vae_decoder=False,
         vae_config=None,
         decoder_config=None,
         image_size=256,
         hidden_size=1024,
+        decoder_hidden_size = 32,
         vocab_size=1,
-        z_step=32,
+        span_size=16,
         text_prompt_pooling_type="first",
         projector_hidden_act="gelu",
         reduction = "mean",
@@ -36,9 +41,10 @@ class TIEDModelConfig(PretrainedConfig):
             raise ValueError("decoder_config must be dict or PretrainedConfig")
 
         self.reduction = reduction
-        self.z_step = z_step
+        self.span_size = span_size
         self.image_size = image_size
         self.hidden_size = hidden_size
+        self.decoder_hidden_size = decoder_hidden_size
         self.text_encoder_config = text_encoder_config
         self.text_encoder_model = text_encoder_model
         self.vae_model = vae_model
@@ -47,6 +53,11 @@ class TIEDModelConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.text_prompt_pooling_type = text_prompt_pooling_type
         self.projector_hidden_act = projector_hidden_act
+
+        self.train_vae = train_vae
+        self.train_text_encoder = train_text_encoder
+        self.train_decoder = train_decoder
+        self.train_vae_decoder = train_vae_decoder
 
     def to_dict(self):
         output = super().to_dict()

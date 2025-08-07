@@ -2,6 +2,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 from transformers import PreTrainedTokenizer
 import requests
+import random
 from io import BytesIO
 import os
 
@@ -11,7 +12,8 @@ class TIEDDataset(Dataset):
         data: list,
         tokenizer: PreTrainedTokenizer,
         image_transform,
-        max_length: int = 128
+        max_length: int = 128,
+        randomize_prompts: bool = True,
     ):
         """
         Args:
@@ -22,6 +24,7 @@ class TIEDDataset(Dataset):
             max_length (int): Maximum token sequence length for the prompt.
         """
         self.data = data
+        self.randomize_prompts = randomize_prompts
         self.tokenizer = tokenizer
         self.image_transform = image_transform
         self.max_length = max_length
@@ -36,14 +39,54 @@ class TIEDDataset(Dataset):
         else:
             image = Image.open(path_or_url).convert("RGB")
         return image
+    
+    def _randomize_prompt(self, prompt: str) -> str:
+        actions = ["none", "lower"] #"upper", 
+        modifications = ["none", "add_space", "add_tab", "add_newline"]
+        cuts = ["none", "cut_05", "cut_025", "random_cut"]
+        
+        action = random.choice(actions)
+        modification = random.choice(modifications)
+        cut = random.choice(cuts)
 
+        if action == "upper":
+            prompt = prompt.upper()
+        elif action == "lower":
+            prompt = prompt.lower()
+
+        if modification == "add_space":
+            prompt = " " + prompt + " "
+        elif modification == "add_tab":
+            prompt = "\t" + prompt + "\t"
+        elif modification == "add_newline":
+            prompt = "\n" + prompt + "\n"
+
+        if cut == "cut_05":
+            prompt = prompt[:len(prompt) // 2]
+        elif cut == "cut_025":
+            prompt = prompt[:len(prompt) // 4]
+        elif cut == "random_cut":
+            cut_length = random.randint(1, len(prompt))
+            start_index = random.randint(0, len(prompt) - cut_length)
+            prompt = prompt[:start_index] + prompt[start_index + cut_length:]
+
+        return prompt
+    
+    def _get_prompt(self, entry: dict) -> str:
+        prompt = entry["prompt"]
+        if self.randomize_prompts:
+            prompt = self._randomize_prompt(prompt)
+
+        return prompt
+    
     def __getitem__(self, idx):
         entry = self.data[idx]
+        prompt = self._get_prompt(entry)
         image = self._load_image(entry["image"])
         pixel_values = self.image_transform(image)
 
         encoded = self.tokenizer(
-            entry["prompt"],
+            prompt,
             padding="max_length",
             truncation=True,
             max_length=self.max_length,
