@@ -43,7 +43,7 @@ class TIEDDataset(Dataset):
         return image
     
     def _randomize_prompt(self, prompt: str) -> str:
-        actions = ["none", "upper", "lower"]
+        actions = ["none", "lower"] #"upper", 
         modifications = ["none", "add_space", "add_tab", "add_newline"]
         cuts = ["none", "cut_05", "cut_025", "random_cut"]
         

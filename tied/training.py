@@ -72,6 +72,10 @@ class TIEDTrainer(Trainer):
 
         model = self.model
         args = self.args
+        for param in model.vae.parameters():
+            param.requires_grad = False
+        for param in model.vae.decoder.parameters():
+            param.requires_grad = True
 
         decay_params = get_parameter_names(model, ALL_LAYERNORM_LAYERS)
         decay_params = [n for n in decay_params if "bias" not in n]
@@ -117,7 +121,7 @@ class TIEDTrainer(Trainer):
         # Remaining parameters (others)
         if args.others_lr is not None:
             def is_other(n):
-                return not is_in(n, "text_encoder") and not is_in(n, "inner_vae") and not is_in(n, "vae")
+                return not is_in(n, "text_encoder") and not is_in(n, "inner_vae")
 
             param_groups += [
                 {
@@ -133,6 +137,18 @@ class TIEDTrainer(Trainer):
                     "lr": args.others_lr,
                 }
             ]
+        for param in model.vae.parameters():
+            param.requires_grad = False
+
+        for param in model.vae.decoder.parameters():
+            param.requires_grad = True
+
+        #TEMP
+        for param in model.vae.parameters():
+            param.requires_grad = False
+        #TEMP
+        for param in model.inner_vae.parameters():
+            param.requires_grad = False
 
         optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(args)
         self.optimizer = optimizer_cls(param_groups, **optimizer_kwargs)

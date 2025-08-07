@@ -1,5 +1,5 @@
 from tied import TIEDModel, TIEDModelConfig
-from transformers import AutoConfig, LlamaConfig, AutoTokenizer
+from transformers import AutoConfig, LlamaConfig, AutoTokenizer, AutoModel
 from diffusers import AutoencoderKL
 from tied.data_processing import TIEDDataset
 from torch.utils.data import DataLoader
@@ -53,6 +53,7 @@ def main(args):
     # Initialize the TIED model
     if args.model_name:
         model = TIEDModel.from_pretrained(args.model_name, reduction=args.reduction, train_vae_only=args.train_vae_only).to(device)
+        # model.text_encoder = AutoModel.from_pretrained(model.config.text_encoder_model)
         tokenizer = AutoTokenizer.from_pretrained(args.model_name, add_prefix_space=True)
     else:
         model = TIEDModel(config).to(device)
@@ -100,6 +101,7 @@ def main(args):
         save_total_limit=args.save_total_limit,
         fp16=args.fp16,
         lr_scheduler_type="cosine",
+        warmup_ratio=0.0005
     )
 
     trainer = TIEDTrainer(
@@ -107,7 +109,7 @@ def main(args):
         args=training_args,
         train_dataset=train_dataset,
         processing_class=tokenizer,
-        data_collator=safe_collate
+        data_collator=safe_collate,
     )
 
     # Start training
@@ -115,25 +117,25 @@ def main(args):
 # checkpoint-267600
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, help="Name of the model to train", default=None)
+    parser.add_argument("--model_name", type=str, help="Name of the model to train", default="checkpoint-3500")
     parser.add_argument("--text_encoder_model", type=str, default="answerdotai/ModernBERT-base", help="Pretrained text encoder model")
     parser.add_argument("--train_data", type=str, help="Path to training data file", default= "wikiart_dataset.json")
     parser.add_argument("--save_path", type=str, help="Directory to save the model", default="models")
     parser.add_argument("--n_pooling_tokens", type=int, default=0, help="Number of pooling tokens")
     parser.add_argument("--randomize_prompts", type=bool, default=True, help="Randomize prompts during training")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
     parser.add_argument("--num_epochs", type=int, default=100, help="Number of training epochs")
 
-    parser.add_argument("--train_vae_only", type=bool, default=False, help="Train only the VAE")
+    parser.add_argument("--train_vae_only", type=bool, default=True, help="Train only the VAE")
 
-    parser.add_argument("--text_encoder_lr", type=float, default=5e-6, help="Learning rate for the optimizer")
+    parser.add_argument("--text_encoder_lr", type=float, default=1e-5, help="Learning rate for the optimizer")
     parser.add_argument("--inner_vae_lr", type=float, default=3e-4, help="Learning rate for the optimizer")
-    parser.add_argument("--others_lr", type=float, default=1e-5, help="Learning rate for the optimizer")
+    parser.add_argument("--others_lr", type=float, default=3e-5, help="Learning rate for the optimizer")
 
     parser.add_argument("--max_length", type=int, default=128, help="Maximum length of text sequences")
-    parser.add_argument("--image_size", type=int, default=128, help="Size of input images")
+    parser.add_argument("--image_size", type=int, default=256, help="Size of input images")
     parser.add_argument("--vae_model", type=str, default="stabilityai/sdxl-vae", help="Pretrained VAE model")
-    parser.add_argument("--hidden_size", type=int, default=768, help="Hidden size for the decoder")
+    parser.add_argument("--hidden_size", type=int, default=2048, help="Hidden size for the decoder")
     parser.add_argument("--text_prompt_pooling_type", type=str, default="first", help="Pooling type for text prompts")
     parser.add_argument("--projector_hidden_act", type=str, default="gelu", help="Activation function for projectors")
     parser.add_argument("--reduction", type=str, default="sum", help="Reduction method for loss calculation")
